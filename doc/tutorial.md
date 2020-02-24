@@ -73,4 +73,103 @@ This is the only item of language runtime we will use in our kernel and it is fu
 
 ### kernel abstraction
 
-The next step is to write some kernel code that is independent from board and it will be responsible for driver loading and IO operations. 
+The next step is to write some kernel code that is independent from board and responsible for driver loading and IO operations.<br/>
+<br/>
+Driver abstraction is pretty easy to write, because we just need to initialize our GPIO and UART devices, so `Driver` trait will contain `init` method. Also we want to know which driver we use, so we will add string identifier using method `name`. <br/>
+The contents of `driver.rs`:
+```Rust
+pub trait Driver {
+    fn init(&self) -> Result<(), &'static str> {
+        Ok(())
+    }
+
+    fn name(&self) -> &str;
+}
+```
+
+For IO operations we need do more work. As I mentioned before, `libcore` does not provide IO operations, so we need to implement the IO abstractions by ourselves... Or make a modified version of `libstd` IO abstractions. I will migrate only `Read` and `Write` traits from `std::io`. The reason why there aren't such traits in `libcore` library is their dependency on heap allocations in Error type and other minor dependencies on runtime related to OS defined operations. The part of IO is already proposed to migrate to `libcore`, you can see the details [here](https://github.com/rust-lang/rfcs/issues/2262). <br/>
+
+Okay, so we need Read trait.<br/>
+Contents of `read.rs`:
+```Rust
+use crate::kernel::io;
+
+pub trait Read {
+    // Error type is associated now to avoid 
+    // dependencies from heap allocations, so 
+    // we can choose the implementation on 
+    // the implementor's side.
+    type Err;
+
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Err>;
+
+    fn read_exact<E>(&mut self, mut buf: &mut [u8]) -> Result<(), E>
+    where
+        E: From<Self::Err>,
+    {
+        // default implementation. see full sources
+    }
+
+    fn by_ref(&mut self) -> &mut Self
+    where
+        Self: Sized,
+    {
+        self
+    }
+
+    fn chain<R: Read, E>(self, next: R) -> io::Chain<Self, R, E>
+    where
+        Self: Sized,
+        E: From<Self::Err> + From<R::Err>,
+    {
+        io::Chain::new(self, next)
+    }
+
+    fn take(self, limit: u64) -> io::Take<Self>
+    where
+        Self: Sized,
+    {
+        io::Take::new(self, limit)
+    }
+}
+```
+And Write trait is implemented in the same way.<br/>
+Contents of `write.rs`:
+```Rust
+use crate::kernel::io;
+use core::fmt;
+
+pub trait Write {
+    type Err; 
+
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Err>;
+
+    fn write_all<E>(&mut self, mut buf: &[u8]) -> Result<(), E>
+    where
+        E: From<Self::Err>
+    {
+        // default implementation. see full sources
+    }
+
+    fn write_fmt<E>(&mut self, fmt: fmt::Arguments) -> Result<(), E>
+    where
+        E: From<Self::Err>,
+    {
+        // default implementation. see full sources
+    }
+}
+```
+This ones are the carbon copy of `libstd` trait version, I just made associated Error type and removed methods that rely on types that use heap allocations.<br/>
+Our kernel code is only missing the entry point.<br/>
+kernel.rs contents:
+```Rust
+pub mod io;
+pub mod driver;
+
+pub fn init() -> ! {
+    loop{}
+}
+```
+
+`io` is a module that contains code with `Read` and `Write` traits. `driver` is a module with `Driver` abstraction.
+I left infinite loop for beginning. I will modify this part as soon as we have drivers ready.
