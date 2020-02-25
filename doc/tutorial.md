@@ -161,7 +161,7 @@ pub trait Write {
 ```
 This ones are the carbon copy of `libstd` trait version, I just made associated Error type and removed methods that rely on types that use heap allocations.<br/>
 Our kernel code is only missing the entry point.<br/>
-kernel.rs contents:
+`kernel.rs` contents:
 ```Rust
 pub mod io;
 pub mod driver;
@@ -173,3 +173,42 @@ pub fn init() -> ! {
 
 `io` is a module that contains code with `Read` and `Write` traits. `driver` is a module with `Driver` abstraction.
 I left infinite loop for beginning. I will modify this part as soon as we have drivers ready.
+
+### board supply package
+
+We have done with main part of kernel abstractions. It it time to write some platform-dependent code. First of all we need an entry point to our kernel image.<br/>
+<br/>
+In RPi 64-bit CPUs kernel is loaded at `0x80000` address, so we need to create linker script file that describes this behavior.<br/>
+Contents of `link.ld`:
+
+```Linker Script
+SECTIONS
+{
+    . = 0x80000;
+
+    .text :
+    {
+        *(.text._start) *(.text*)
+    }
+}
+```
+
+This one says that code should be loaded at `0x80000` address. And `.text` section is stored by that address. And the first symbol in `.text` is our kernel entry point. All the space after this symbol is a kernel code. This should be enough to link our little kernel.<br/>
+<br/>
+The next step is writing the entry point in Rust. Such languages as Rust and C++ use name mangling to be able to support member functions and function overloading (only C++). We need to disable this feature only for our entry point to have the same symbol compiled as described in the linker script.<br/>
+Contents of `bsp.rs`:
+
+```Rust
+use crate::kernel;
+
+#[no_mangle]
+extern "C" fn _start() -> ! {
+    kernel::init()
+}
+```
+
+Okay, now kernel imange should be linked correctly.
+The last and the most important thing we need to do is writing GPIO and UART drivers.<br/>
+<br/>
+Rasperry Pi 3 has 2 UART devices: mini UART and PL011 UART. PL011 UART is connected to the Bluetooth module, while the mini UART is used as the primary UART. But in fact we can use PL011 UART with GPIO 14 & 15 pins using alternative function configuration for this device. <br/>
+The main driver logic is implemented by Andre Richter. You can find his writing OS tutorial [here](https://github.com/rust-embedded/rust-raspi3-OS-tutorials). I've modified UART driver to implement our kernel::io traits, so we can use it like simple console with read and write operations.

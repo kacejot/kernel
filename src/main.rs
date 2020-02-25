@@ -2,6 +2,7 @@
 #![no_main]
 
 mod kernel;
+mod bsp;
 
 use core::panic::PanicInfo;
 
