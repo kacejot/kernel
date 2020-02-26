@@ -20,3 +20,5 @@ pub struct OutOfBounds;
 
 #[derive(Copy, Clone, Debug)]
 pub struct FormatError;
+
+pub trait Console = Read + Write;

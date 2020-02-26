@@ -1,5 +1,7 @@
+use super::result::KernelResult;
+
 pub trait Driver {
-    fn init(&self) -> Result<(), &'static str> {
+    fn init(&self) -> KernelResult {
         Ok(())
     }
 

@@ -1,3 +1,5 @@
+#![feature(custom_inner_attributes)]
+#![feature(trait_alias)]
 #![no_std]
 #![no_main]
 

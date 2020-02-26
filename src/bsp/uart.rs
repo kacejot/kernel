@@ -4,9 +4,10 @@
 
 //! PL011 UART driver.
 
-use crate::{arch, arch::sync::NullLock, interface};
-use core::{fmt, ops};
-use register::{mmio::*, register_bitfields, register_structs};
+use core::ops;
+use register::{mmio::{WriteOnly, ReadOnly, ReadWrite}, register_bitfields, register_structs};
+
+use crate::{ bsp::{self, mmio }, kernel::{io, result::{ KernelError, KernelResult}, driver} };
 
 // PL011 UART registers.
 //
@@ -14,6 +15,39 @@ use register::{mmio::*, register_bitfields, register_structs};
 // https://github.com/raspberrypi/documentation/files/1888662/BCM2837-ARM-Peripherals.-.Revised.-.V2-1.pdf
 register_bitfields! {
     u32,
+    /// Data Register
+    DR [
+        /// Overrun error. This bit is set to 1 if data is received and the receive FIFO is already
+        /// full.
+        /// 
+        /// This is cleared to 0 once there is an empty space in the FIFO and a new character can
+        /// be written to it.
+        OE OFFSET(11) NUMBITS(8) [],
+        
+        /// Break error. This bit is set to 1 if a break condition was detected, indicating that
+        /// the received data input was held LOW for longer than a full-word transmission time
+        /// (defined as start, data, parity and stop bits).
+        /// 
+        /// In FIFO mode, this error is associated with the character at the top of the FIFO. When
+        /// a break occurs, only one 0 character is loaded into the FIFO. The next character is
+        /// only enabled after the receive data input goes to a 1 (marking state), an
+        BE OFFSET(10) NUMBITS(8) [],
+
+        /// Parity error. When set to 1, it indicates that the parity of the received data
+        /// character does not match the parity that the EPS and SPS bits in the Line Control
+        /// Register, UART_LCRH select. In FIFO mode, this error is associated with the character
+        /// at the top of the FIFO.
+        PE OFFSET(9) NUMBITS(8) [],
+
+        /// Framing error. When set to 1, it indicates that the received character did not have a
+        /// valid stop bit (a valid stop bit is 1). In FIFO mode, this error is associated with the
+        /// character at the top of the FIFO.
+        FE OFFSET(8) NUMBITS(8) [],
+
+        /// Receive (read) data character.
+        /// Transmit (write) data character.
+        DATA OFFSET(0) NUMBITS(8) []
+    ],
 
     /// Flag Register
     FR [
@@ -69,7 +103,7 @@ register_bitfields! {
         /// registers
         ///
         /// 1 = transmit and receive FIFO buffers are enabled (FIFO mode).
-        FEN  OFFSET(4) NUMBITS(1) [
+        FEN OFFSET(4) NUMBITS(1) [
             FifosDisabled = 0,
             FifosEnabled = 1
         ]
@@ -80,7 +114,7 @@ register_bitfields! {
         /// Receive enable. If this bit is set to 1, the receive section of the UART is enabled.
         /// Data reception occurs for UART signals. When the UART is disabled in the middle of
         /// reception, it completes the current character before stopping.
-        RXE    OFFSET(9) NUMBITS(1) [
+        RXE OFFSET(9) NUMBITS(1) [
             Disabled = 0,
             Enabled = 1
         ],
@@ -88,7 +122,7 @@ register_bitfields! {
         /// Transmit enable. If this bit is set to 1, the transmit section of the UART is enabled.
         /// Data transmission occurs for UART signals. When the UART is disabled in the middle of
         /// transmission, it completes the current character before stopping.
-        TXE    OFFSET(8) NUMBITS(1) [
+        TXE OFFSET(8) NUMBITS(1) [
             Disabled = 0,
             Enabled = 1
         ],
@@ -112,7 +146,7 @@ register_bitfields! {
 register_structs! {
     #[allow(non_snake_case)]
     pub RegisterBlock {
-        (0x00 => DR: ReadWrite<u32>),
+        (0x00 => DR: ReadWrite<u32, DR::Register>),
         (0x04 => _reserved1),
         (0x18 => FR: ReadOnly<u32, FR::Register>),
         (0x1c => _reserved2),
@@ -126,24 +160,9 @@ register_structs! {
     }
 }
 
-/// The driver's mutex protected part.
-pub struct PL011UartInner {
-    base_addr: usize,
-    chars_written: usize,
-    chars_read: usize,
-}
+pub struct PL011Uart;
 
-/// Deref to RegisterBlock.
-///
-/// Allows writing
-/// ```
-/// self.DR.read()
-/// ```
-/// instead of something along the lines of
-/// ```
-/// unsafe { (*PL011UartInner::ptr()).DR.read() }
-/// ```
-impl ops::Deref for PL011UartInner {
+impl ops::Deref for PL011Uart {
     type Target = RegisterBlock;
 
     fn deref(&self) -> &Self::Target {
@@ -151,162 +170,72 @@ impl ops::Deref for PL011UartInner {
     }
 }
 
-impl PL011UartInner {
-    pub const unsafe fn new(base_addr: usize) -> PL011UartInner {
-        PL011UartInner {
-            base_addr,
-            chars_written: 0,
-            chars_read: 0,
-        }
+impl PL011Uart {
+    /// Return a pointer to the register block.
+    fn ptr(&self) -> *const RegisterBlock {
+        mmio::UART_BASE as *const _
+    }
+}
+
+impl driver::Driver for PL011Uart {
+    fn name(&self) -> &str {
+        "PL011Uart"
     }
 
     /// Set up baud rate and characteristics.
     ///
     /// Results in 8N1 and 230400 baud (if the clk has been previously set to 48 MHz by the
     /// firmware).
-    pub fn init(&self) {
-        // Turn it off temporarily.
+    fn init(&self) -> KernelResult {
+        // UART init state
         self.CR.set(0);
-
         self.ICR.write(ICR::ALL::CLEAR);
+        
+        // Set baud rate
         self.IBRD.write(IBRD::IBRD.val(13));
         self.FBRD.write(FBRD::FBRD.val(2));
+        
+        // Set 8-bit as data size and enable FIFO
         self.LCRH
             .write(LCRH::WLEN::EightBit + LCRH::FEN::FifosEnabled); // 8N1 + Fifo on
+        
+        // Enable UART, enable RW
         self.CR
             .write(CR::UARTEN::Enabled + CR::TXE::Enabled + CR::RXE::Enabled);
-    }
-
-    /// Return a pointer to the register block.
-    fn ptr(&self) -> *const RegisterBlock {
-        self.base_addr as *const _
-    }
-
-    /// Send a character.
-    fn write_char(&mut self, c: char) {
-        // Spin while TX FIFO full is set, waiting for an empty slot.
-        while self.FR.matches_all(FR::TXFF::SET) {
-            arch::nop();
-        }
-
-        // Write the character to the buffer.
-        self.DR.set(c as u32);
-
-        self.chars_written += 1;
-    }
-}
-
-/// Implementing `core::fmt::Write` enables usage of the `format_args!` macros, which in turn are
-/// used to implement the `kernel`'s `print!` and `println!` macros. By implementing `write_str()`,
-/// we get `write_fmt()` automatically.
-///
-/// The function takes an `&mut self`, so it must be implemented for the inner struct.
-///
-/// See [`src/print.rs`].
-///
-/// [`src/print.rs`]: ../../print/index.html
-impl fmt::Write for PL011UartInner {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        for c in s.chars() {
-            self.write_char(c);
-        }
 
         Ok(())
     }
 }
 
-//--------------------------------------------------------------------------------------------------
-// Export the inner struct so that BSPs can use it for the panic handler
-//--------------------------------------------------------------------------------------------------
-pub use PL011UartInner as PanicUart;
+impl io::Write for PL011Uart {
+    type Err = KernelError;
 
-//--------------------------------------------------------------------------------------------------
-// BSP-public
-//--------------------------------------------------------------------------------------------------
+    fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Err> {
 
-/// The driver's main struct.
-pub struct PL011Uart {
-    inner: NullLock<PL011UartInner>,
-}
+        for byte in buf {
+            while self.FR.matches_all(FR::TXFF::SET) {
+                bsp::nop();
+            }
 
-impl PL011Uart {
-    /// # Safety
-    ///
-    /// The user must ensure to provide the correct `base_addr`.
-    pub const unsafe fn new(base_addr: usize) -> PL011Uart {
-        PL011Uart {
-            inner: NullLock::new(PL011UartInner::new(base_addr)),
+            self.DR.write(DR::DATA.val(*byte as u32));
         }
+
+        Ok(buf.len())
     }
 }
 
-//--------------------------------------------------------------------------------------------------
-// OS interface implementations
-//--------------------------------------------------------------------------------------------------
-use interface::sync::Mutex;
-
-impl interface::driver::DeviceDriver for PL011Uart {
-    fn compatible(&self) -> &str {
-        "PL011Uart"
-    }
-
-    fn init(&self) -> interface::driver::Result {
-        let mut r = &self.inner;
-        r.lock(|inner| inner.init());
-
-        Ok(())
-    }
-}
-
-impl interface::console::Write for PL011Uart {
-    /// Passthrough of `args` to the `core::fmt::Write` implementation, but guarded by a Mutex to
-    /// serialize access.
-    fn write_char(&self, c: char) {
-        let mut r = &self.inner;
-        r.lock(|inner| inner.write_char(c));
-    }
-
-    fn write_fmt(&self, args: core::fmt::Arguments) -> fmt::Result {
-        // Fully qualified syntax for the call to `core::fmt::Write::write:fmt()` to increase
-        // readability.
-        let mut r = &self.inner;
-        r.lock(|inner| fmt::Write::write_fmt(inner, args))
-    }
-}
-
-impl interface::console::Read for PL011Uart {
-    fn read_char(&self) -> char {
-        let mut r = &self.inner;
-        r.lock(|inner| {
-            // Spin while RX FIFO empty is set.
-            while inner.FR.matches_all(FR::RXFE::SET) {
-                arch::nop();
+impl io::Read for PL011Uart {
+    type Err = KernelError;
+    
+    fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Err> {
+        for byte in buf { 
+            while self.FR.matches_all(FR::RXFE::SET) {
+                bsp::nop();
             }
+    
+            *byte = self.DR.read(DR::DATA) as u8;
+        }
 
-            // Read one character.
-            let mut ret = inner.DR.get() as u8 as char;
-
-            // Convert carrige return to newline.
-            if ret == '\r' {
-                ret = '\n'
-            }
-
-            // Update statistics.
-            inner.chars_read += 1;
-
-            ret
-        })
-    }
-}
-
-impl interface::console::Statistics for PL011Uart {
-    fn chars_written(&self) -> usize {
-        let mut r = &self.inner;
-        r.lock(|inner| inner.chars_written)
-    }
-
-    fn chars_read(&self) -> usize {
-        let mut r = &self.inner;
-        r.lock(|inner| inner.chars_read)
+        Ok(buf.len())
     }
 }

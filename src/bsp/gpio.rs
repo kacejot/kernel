@@ -7,7 +7,7 @@
 use core::ops;
 use register::{mmio::ReadWrite, register_bitfields, register_structs};
 
-use crate::kernel::driver;
+use crate::{kernel::driver, bsp::mmio};
 
 // GPIO registers.
 //
@@ -72,20 +72,22 @@ pub struct GPIO;
 
 impl GPIO {
     fn ptr(&self) -> *const RegisterBlock {
-        self.base_addr as *const _
+        mmio::GPIO_BASE as *const _
     }
 
     pub fn map_pl011_uart(&self) {
         use crate::bsp;
 
+        // Bind PL011 UART to 14 and 15 pins instead of mini UART
         self
             .GPFSEL1
             .modify(GPFSEL1::FSEL14::AltFunc0 + GPFSEL1::FSEL15::AltFunc0);
 
-        // Enable pins 14 and 15.
+        // Disable pull-up/down
         self.GPPUD.set(0);
         bsp::spin_for_cycles(150);
 
+        // Enable pins 14 and 15
         self
             .GPPUDCLK0
             .write(GPPUDCLK0::PUDCLK14::AssertClock + GPPUDCLK0::PUDCLK15::AssertClock);
