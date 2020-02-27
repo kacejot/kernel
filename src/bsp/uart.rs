@@ -22,7 +22,7 @@ register_bitfields! {
         /// 
         /// This is cleared to 0 once there is an empty space in the FIFO and a new character can
         /// be written to it.
-        OE OFFSET(11) NUMBITS(8) [],
+        OE OFFSET(11) NUMBITS(1) [],
         
         /// Break error. This bit is set to 1 if a break condition was detected, indicating that
         /// the received data input was held LOW for longer than a full-word transmission time
@@ -31,18 +31,18 @@ register_bitfields! {
         /// In FIFO mode, this error is associated with the character at the top of the FIFO. When
         /// a break occurs, only one 0 character is loaded into the FIFO. The next character is
         /// only enabled after the receive data input goes to a 1 (marking state), an
-        BE OFFSET(10) NUMBITS(8) [],
+        BE OFFSET(10) NUMBITS(1) [],
 
         /// Parity error. When set to 1, it indicates that the parity of the received data
         /// character does not match the parity that the EPS and SPS bits in the Line Control
         /// Register, UART_LCRH select. In FIFO mode, this error is associated with the character
         /// at the top of the FIFO.
-        PE OFFSET(9) NUMBITS(8) [],
+        PE OFFSET(9) NUMBITS(1) [],
 
         /// Framing error. When set to 1, it indicates that the received character did not have a
         /// valid stop bit (a valid stop bit is 1). In FIFO mode, this error is associated with the
         /// character at the top of the FIFO.
-        FE OFFSET(8) NUMBITS(8) [],
+        FE OFFSET(8) NUMBITS(1) [],
 
         /// Receive (read) data character.
         /// Transmit (write) data character.
